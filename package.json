@@ -1,0 +1,14 @@
+{
+  "name": "dictionary-server",
+  "version": "1.0.0",
+  "description": "Self-hosted English dictionary API from kaikki.org Wiktionary data, served over a local SQLite database.",
+  "author": "roro",
+  "license": "MIT",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "bun server.js",
+    "import": "bun import.js",
+    "refresh": "bun refresh.js"
+  }
+}

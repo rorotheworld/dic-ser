@@ -1,0 +1,4 @@
+# This project runs inside a Linux container (oven/bun:alpine). Keep every file
+# LF in the repo regardless of the checkout platform.
+* text=auto eol=lf
+*.png binary

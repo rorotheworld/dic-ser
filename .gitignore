@@ -1,0 +1,12 @@
+# Runtime data (SQLite + JSONL + downloads) is a host volume, never committed.
+data/
+*.db
+*.db.new
+*.db.old
+*.jsonl
+*.jsonl.gz
+*.jsonl.gz.tmp
+
+# Node/Bun misc
+node_modules/
+bun.lockb
