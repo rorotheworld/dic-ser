@@ -41,6 +41,74 @@ const AUDIO_DIR = join(DATA_DIR, "audio");
 const SWAP_POLL_MS = Number(process.env.SWAP_POLL_MS || 5000);
 const AUDIO_TTL_MS = 30 * 24 * 60 * 60 * 1000; // TTS cache expiry: 30 days
 const FETCH_TIMEOUT_MS = 2500; // per-tier deadline
+// Opt-in last-resort definition source. The local DB is a weekly, English-only
+// cut of Wiktionary; a word absent from it (foreign term, or one added since the
+// last extract) normally renders an empty card. When this is on (default), a
+// local miss fires one bounded fetch to Wiktionary's live REST API as an
+// alternate definition source. Disable it (WIKTIONARY_FALLBACK=0) to keep the
+// instance strictly self-hosted - no egress at all. External fetches honour
+// HTTPS_PROXY (Proton exit) like the audio tiers do.
+const WIKTIONARY_FALLBACK = String(process.env.WIKTIONARY_FALLBACK || "1") !== "0";
+const WIKTIONARY_REST = (lang) =>
+  `https://en.wiktionary.org/api/rest_v1/page/definition/${lang}`;
+
+// Map a Wiktionary REST definition payload into the same entry shape the local
+// DB server and the define-slot plugin already understand. Only real dictionary
+// languages (English `en`, plus the request language when it differs) are taken;
+// the `other` bucket of homographs/etymologies is skipped to keep the card at
+// one language. Definitions come back as tiny HTML (links, usage spans) which
+// is stripped to plain text. Returns null when nothing usable came back.
+function mapRESTResponse(payload, langCode) {
+  const bucket = payload?.[langCode] || payload?.en;
+  if (!Array.isArray(bucket) || bucket.length === 0) return null;
+
+  const entries = [];
+  for (const block of bucket) {
+    if (typeof block !== "object" || !block) continue;
+    const defs = Array.isArray(block.definitions) ? block.definitions : [];
+    const glosses = defs
+      .map((d) => stripTags(String(d?.definition || "")))
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    if (!glosses.length) continue;
+    entries.push({
+      lang_code: langCode,
+      pos: String(block.partOfSpeech || "").trim(),
+      senses: [{ glosses }],
+      sounds: [],
+      etymology: "",
+      related: {},
+    });
+  }
+
+  return entries.length ? entries : null;
+}
+
+// Wiktionary REST fallback for a local miss. Returns a server entry object, or
+// null if the live API has nothing / errors / times out (the caller keeps the
+// fail-clean 404). Bounded by FETCH_TIMEOUT_MS so a slow Wiktionary never holds
+// the card open past its budget.
+async function wiktionaryRest(word, langCode) {
+  if (!WIKTIONARY_FALLBACK) return null;
+  const url = WIKTIONARY_REST(encodeURIComponent(word));
+  try {
+    const res = await fetchWithTimeout(url, {
+      headers: { "User-Agent": "degoog-dictionary/1.0 (self-hosted dictionary card)" },
+    });
+    if (!res.ok) return null;
+    const payload = await res.json();
+    const entries = mapRESTResponse(payload, langCode);
+    if (!entries) return null;
+    return {
+      word,
+      editions: ["en"],
+      source: "wiktionary-rest",
+      entries,
+    };
+  } catch {
+    return null;
+  }
+}
 
 let db;
 let SELECT_ENTRIES;
@@ -411,6 +479,14 @@ Bun.serve({
       const lang = url.searchParams.get("lang") || "en";
       const result = lookup(word, lang);
       if (!result) {
+        // Local miss: never fail clean until the opt-in Wiktionary REST
+        // fallback has had its one bounded call. If that finds nothing,
+        // error, or is disabled, the 404 stands.
+        const fallback = await wiktionaryRest(word, lang);
+        if (fallback) {
+          log(200, `word=${word} entries=${fallback.entries.length} source=wiktionary-rest`);
+          return Response.json(fallback);
+        }
         log(404, `word=${word}`);
         return Response.json({ error: `No entries found for "${word}"` }, { status: 404 });
       }
