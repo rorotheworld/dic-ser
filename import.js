@@ -1,4 +1,4 @@
-// dictionary-server: import of kaikki.org wiktextract data into SQLite.
+// dic-ser: import of kaikki.org wiktextract data into SQLite.
 //
 // Reads a JSON-Lines file produced by wiktextract (the same data dictionaryapi.dev
 // and wiktapi are built on) and loads it into a staging SQLite database.

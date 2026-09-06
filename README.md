@@ -1,4 +1,4 @@
-# dictionary-server
+# dic-ser
 
 Self-hosted English dictionary API from Wiktionary data. Serves clean JSON
 definitions from a local SQLite database, so lookups are instant and work
@@ -39,14 +39,14 @@ Dockerfile    container image
 Build and run (data lives on a host volume):
 
 ```
-docker build -t dictionary-server .
-docker run -p 3000:3000 -v ./data:/data dictionary-server
+docker build -t dic-ser .
+docker run -p 3000:3000 -v ./data:/data dic-ser
 ```
 
 First run needs the database built:
 
 ```
-docker run --rm -v ./data:/data dictionary-server bun refresh.js
+docker run --rm -v ./data:/data dic-ser bun refresh.js
 ```
 
 `refresh.js` supports `--force` to discard a cached download and fetch the

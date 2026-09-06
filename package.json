@@ -1,5 +1,5 @@
 {
-  "name": "dictionary-server",
+  "name": "dic-ser",
   "version": "1.0.0",
   "description": "Self-hosted English dictionary API from kaikki.org Wiktionary data, served over a local SQLite database.",
   "author": "roro",

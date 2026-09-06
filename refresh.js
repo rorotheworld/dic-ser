@@ -1,9 +1,9 @@
-// dictionary-server: weekly data refresh.
+// dic-ser: weekly data refresh.
 //
 // Downloads the current English-Wiktionary wiktextract extract from kaikki.org
 // and imports it into a STAGING SQLite (wiktionary.db.new) beside the live
 // database. It does NOT swap the file into place itself: after a successful
-// import it writes /data/.refresh-ready, which the dictionary server watches and
+// import it writes /data/.refresh-ready, which dic-ser watches and
 // hot-swaps (close old DB handle, move new over live, reopen). Lookups keep
 // serving old data until the instant of the move.
 //
@@ -112,10 +112,10 @@ async function main() {
 
   // Signal the server to hot-swap. Written only after the DB is fully built.
   await writeFile(READY_MARKER, new Date().toISOString());
-  console.log(`Wrote ${READY_MARKER}; dictionary server will hot-swap within its poll window.`);
+  console.log(`Wrote ${READY_MARKER}; dic-ser will hot-swap within its poll window.`);
 
   await notify(
-    `dictionary-server refresh OK: ${count.toLocaleString()} English entries, ${(size / 1e9).toFixed(2)} GB. Hot-swapping.`,
+    `dic-ser refresh OK: ${count.toLocaleString()} English entries, ${(size / 1e9).toFixed(2)} GB. Hot-swapping.`,
   );
 
   // 4. Reclaim disk: the cached extract is only needed to rebuild. The weekly
@@ -127,7 +127,7 @@ async function main() {
 
 main().catch(async (err) => {
   console.error("refresh failed:", err);
-  await notify(`dictionary-server refresh FAILED: ${String(err?.message || err)}. Old data still serving.`).catch(() => {});
+  await notify(`dic-ser refresh FAILED: ${String(err?.message || err)}. Old data still serving.`).catch(() => {});
   // Remove a half-built staging DB so a retry starts clean, and leave the cached
   // extract alone (a retry can reuse it instead of re-downloading).
   await rm(NEW_DB_PATH, { force: true }).catch(() => {});

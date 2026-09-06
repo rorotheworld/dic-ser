@@ -1,4 +1,4 @@
-// dictionary-server: the HTTP API the degoog define-slot plugin calls.
+// dic-ser: the HTTP API the degoog define-slot plugin calls.
 //
 // Serves a kaikki word entry from the SQLite database built by import.js /
 // refresh.js, plus a pronunciation-audio resolver.
@@ -102,7 +102,7 @@ function mapRESTResponse(payload, langCode) {
 // spelling never reaches the card - the returned word is the real page title.
 async function wiktionaryRest(word, langCode) {
   if (!WIKTIONARY_FALLBACK) return null;
-  const headers = { "User-Agent": "degoog-dictionary/1.0 (self-hosted dictionary card)" };
+  const headers = { "User-Agent": "dic-ser/1.0 (self-hosted dictionary card)" };
 
   async function fetchDefinitions(spelling) {
     const url = WIKTIONARY_REST(encodeURIComponent(spelling));
@@ -317,7 +317,7 @@ async function cambridgeAudio(word, accent) {
   const lemma = encodeURIComponent(word);
   const pageUrl = `https://dictionary.cambridge.org/dictionary/english/${lemma}`;
   const res = await fetchWithTimeout(pageUrl, {
-    headers: { "User-Agent": "degoog-dictionary/1.0 (self-hosted dictionary card)" },
+    headers: { "User-Agent": "dic-ser/1.0 (self-hosted dictionary card)" },
   });
   if (!res.ok) return null;
 
@@ -348,7 +348,7 @@ async function cambridgeAudio(word, accent) {
   let src = m[1];
   if (src.startsWith("/")) src = `https://dictionary.cambridge.org${src}`;
   const audio = await fetchWithTimeout(src, {
-    headers: { "User-Agent": "degoog-dictionary/1.0 (self-hosted dictionary card)", Accept: "audio/*" },
+    headers: { "User-Agent": "dic-ser/1.0 (self-hosted dictionary card)", Accept: "audio/*" },
   });
   if (!audio.ok) return null;
   const bytes = await audio.arrayBuffer();
@@ -382,7 +382,7 @@ async function wiktionaryAudio(word, accent) {
   const url = wiktionarySound(word, accent);
   if (!url) return null;
   const res = await fetchWithTimeout(url, {
-    headers: { "User-Agent": "degoog-dictionary/1.0 (self-hosted dictionary card)", Accept: "audio/*" },
+    headers: { "User-Agent": "dic-ser/1.0 (self-hosted dictionary card)", Accept: "audio/*" },
   });
   if (!res.ok) return null;
   const bytes = await res.arrayBuffer();
@@ -573,4 +573,4 @@ Bun.serve({
   },
 });
 
-console.log(`dictionary-server listening on :${PORT}, db ${DB_PATH}`);
+console.log(`dic-ser listening on :${PORT}, db ${DB_PATH}`);
