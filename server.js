@@ -86,6 +86,7 @@ function mapRESTResponse(payload, langCode) {
       if (!glosses.length) continue;
       entries.push({
         lang_code: lang,
+        language: langName(lang),
         pos: String(block.partOfSpeech || "").trim(),
         senses: [{ glosses }],
         sounds: [],
@@ -102,22 +103,59 @@ function mapRESTResponse(payload, langCode) {
 // null if the live API has nothing / errors / times out (the caller keeps the
 // fail-clean 404). Bounded by FETCH_TIMEOUT_MS so a slow Wiktionary never holds
 // the card open past its budget.
+//
+// Accent-insensitive: Wiktionary has no `etranger` page (no redirect), but its
+// search API is accent-insensitive and returns `étranger` as the top hit. So a
+// definition-404 is retried against search once and, when the top result is a
+// different spelling, the definition is fetched under that spelling. The wrong
+// spelling never reaches the card - the returned word is the real page title.
 async function wiktionaryRest(word, langCode) {
   if (!WIKTIONARY_FALLBACK) return null;
-  const url = WIKTIONARY_REST(encodeURIComponent(word));
-  try {
-    const res = await fetchWithTimeout(url, {
-      headers: { "User-Agent": "degoog-dictionary/1.0 (self-hosted dictionary card)" },
-    });
+  const headers = { "User-Agent": "degoog-dictionary/1.0 (self-hosted dictionary card)" };
+
+  async function fetchDefinitions(spelling) {
+    const url = WIKTIONARY_REST(encodeURIComponent(spelling));
+    const res = await fetchWithTimeout(url, { headers });
     if (!res.ok) return null;
     const payload = await res.json();
     const entries = mapRESTResponse(payload, langCode);
     if (!entries) return null;
+    return { word: spelling, entries };
+  }
+
+  try {
+    // 1. Exact spelling (fast path - most local misses are also REST hits or 404s).
+    let found = await fetchDefinitions(word);
+    // 2. Accent-insensitive fallback: only on a real definition miss, ask search
+    //    once. If the top result is the word under a corrected spelling, serve
+    //    that page's definitions under its true title. Accept the hit ONLY when
+    //    it differs from the typed word by case/diacritics alone (etranger ->
+    //    étranger); a lone better spelling (fuzzy suggestion for a typo) is
+    //    NOT followed - that would silently redefine the wrong word.
+    if (!found) {
+      const search = await fetchWithTimeout(
+        `https://en.wiktionary.org/w/api.php?action=query&format=json&list=search&srsearch=${encodeURIComponent(word)}&srlimit=3&srnamespace=0`,
+        { headers },
+      );
+      if (search.ok) {
+        const searchJson = await search.json();
+        const hits = searchJson?.query?.search || [];
+        if (hits.length) {
+          const top = String(hits[0].title || "").trim();
+          if (top && top.toLowerCase() !== word.toLowerCase() && sameBaseLetters(word, top)) {
+            found = await fetchDefinitions(top);
+          }
+        }
+      }
+    }
+    if (!found) return null;
+    const langs = [...new Set(found.entries.map((e) => e.lang_code))];
     return {
-      word,
+      word: found.word,
       editions: ["en"],
+      langs,
       source: "wiktionary-rest",
-      entries,
+      entries: found.entries,
     };
   } catch {
     return null;
@@ -129,6 +167,48 @@ let SELECT_ENTRIES;
 let COUNT_WORDS;
 let SELECT_SOUNDS;
 let WORD_EXISTS;
+
+// ISO 639-1 -> human-readable language name, for the card's language label and
+// the Wiktionary hotlink target. Wiktionary can serve any of these buckets; the
+// plugin displays the name and links to {code}.wiktionary.org/wiki/{word}.
+const LANG_NAMES = {
+  en: "English",
+  fr: "French",
+  es: "Spanish",
+  de: "German",
+  it: "Italian",
+  pt: "Portuguese",
+  nl: "Dutch",
+  la: "Latin",
+  el: "Greek",
+  ru: "Russian",
+  pl: "Polish",
+  ca: "Catalan",
+  ast: "Asturian",
+  da: "Danish",
+  sv: "Swedish",
+  gl: "Galician",
+  nrm: "Norman",
+  "other": "Other",
+};
+
+function langName(code) {
+  return LANG_NAMES[code] || code;
+}
+
+// True when two strings are the same letters ignoring case and diacritics
+// (etranger/étranger, cafe/café, resum/reésum) - used to gate accent-only
+// search retries so the card never silently follows a fuzzy spelling fix.
+function sameBaseLetters(a, b) {
+  return normalizeBase(a) === normalizeBase(b);
+}
+
+function normalizeBase(s) {
+  return String(s || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+}
 
 function openDb() {
   const conn = new Database(DB_PATH, { readonly: true });
@@ -209,8 +289,10 @@ function lookup(word, langCode) {
   return {
     word,
     editions: ["en"],
+    langs: [...new Set(rows.map((r) => r.lang_code))],
     entries: rows.map((row) => ({
       lang_code: row.lang_code,
+      language: langName(row.lang_code),
       pos: row.pos,
       senses: JSON.parse(row.senses || "[]"),
       sounds: JSON.parse(row.sounds || "[]"),
@@ -358,6 +440,75 @@ async function ttsAudio(word, accent) {
   if (!res.ok) return null;
   const bytes = await res.arrayBuffer();
   return bytes.byteLength ? new Uint8Array(bytes) : null;
+}
+
+// Foreign-language pronunciation (non-English words served by the Wiktionary
+// REST fallback). Real human clips come from the word's own language project:
+// {lang}.wiktionary.org's media-list exposes the audio files attached to the
+// page; imageinfo resolves the upload.wikimedia.org URL; we fetch and cache
+// the bytes like any other tier. The clip carries no UK/US split - a French
+// word has one pronunciation, not two - so the plugin shows a single
+// "Pronounce (French)" button for it.
+async function foreignAudio(word, lang) {
+  if (!lang || lang === "en") return null;
+  const headers = { "User-Agent": "degoog-dictionary/1.0 (self-hosted dictionary card)" };
+  const mlUrl = `https://${lang}.wiktionary.org/api/rest_v1/page/media-list/${encodeURIComponent(word)}`;
+  try {
+    const ml = await fetchWithTimeout(mlUrl, { headers });
+    if (!ml.ok) return null;
+    const payload = await ml.json();
+    const audios = (payload?.items || []).filter((i) => i?.type === "audio");
+    if (!audios.length) return null;
+
+    // Prefer a clip whose filename looks like a plain word recording over the
+    // generic gallery pile: title starts with the word's first letters or the
+    // lang prefix (Fr-, Es-...). Falls back to the first audio item.
+    const title = pickForeignRecording(word, audios);
+    if (!title) return null;
+
+    const iiUrl =
+      `https://${lang}.wiktionary.org/w/api.php?action=query&format=json` +
+      `&prop=imageinfo&iiprop=url&titles=${encodeURIComponent(title)}`;
+    const ii = await fetchWithTimeout(iiUrl, { headers });
+    if (!ii.ok) return null;
+    const iiJson = await ii.json();
+    let src = "";
+    outer: for (const page of Object.values(iiJson?.query?.pages || {})) {
+      for (const info of page?.imageinfo || []) {
+        if (info?.url) { src = info.url; break outer; }
+      }
+    }
+    if (!src) return null;
+
+    const audio = await fetchWithTimeout(src, { headers, Accept: "audio/*" });
+    if (!audio.ok) return null;
+    const bytes = await audio.arrayBuffer();
+    return bytes.byteLength ? new Uint8Array(bytes) : null;
+  } catch {
+    return null;
+  }
+}
+
+// Pick a sensible recording title out of media-list's audio items. Wiktionary
+// names real clips Fr-<word>.ogg / LL-Q150_(...)-<word>.wav; gallery junk is
+// untitled or generic. Score by how early the word's letters appear.
+function pickForeignRecording(word, audios) {
+  if (!audios.length) return null;
+  const plain = [word.toLowerCase().replace(/[^a-zà-öø-ÿ]/g, "")];
+  let best = null;
+  let bestScore = 0;
+  for (const a of audios) {
+    if (!a?.title) continue;
+    const lower = a.title.toLowerCase();
+    let score = 0;
+    if (/\b(?:en|fr|es|de|it|pt)-/.test(lower)) score += 5;
+    if (lower.includes("ll-q")) score += 1;
+    for (const p of plain) {
+      if (p && lower.includes(p)) score += 10;
+    }
+    if (score > bestScore) { bestScore = score; best = a.title; }
+  }
+  return best || audios[0]?.title || null;
 }
 
 async function resolveAudio(word, accent) {
@@ -508,11 +659,29 @@ Bun.serve({
       return Response.json(result);
     }
 
-    // /audio/{word}?accent=uk|us
+    // /audio/{word}?accent=uk|us&lang=fr
     const audioMatch = url.pathname.match(/^\/audio\/(.+)$/);
     if (audioMatch) {
       const word = decodeURIComponent(audioMatch[1]).toLowerCase();
+      const lang = (url.searchParams.get("lang") || "").toLowerCase();
       const accent = url.searchParams.get("accent") === "us" ? "us" : "uk";
+      // Foreign pronunciation: language subdomain, real clip, no UK/US split.
+      if (lang && lang !== "en") {
+        const cacheKey = audioCachePath(word, lang, "foreign");
+        let res = serveCached(cacheKey);
+        if (!res) {
+          const bytes = await foreignAudio(word, lang);
+          if (bytes) {
+            saveAudio(cacheKey, bytes);
+            console.log(`audio word=${word} lang=${lang} src=foreign cache=miss ${Math.round(bytes.byteLength / 1024)}KB`);
+            res = serveCached(cacheKey);
+          }
+        } else {
+          console.log(`audio word=${word} lang=${lang} src=foreign cache=hit`);
+        }
+        log(res?.status ?? 404, `audio word=${word} lang=${lang}`);
+        return res ?? Response.json({ error: "No audio available" }, { status: 404 });
+      }
       // Only real dictionary headwords qualify for pronunciation audio. A word
       // with no entry at all (nonsense/typo/random string) must never reach the
       // external sources or pollute the cache with TTS noise.
