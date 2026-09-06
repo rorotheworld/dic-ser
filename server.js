@@ -269,76 +269,111 @@ async function ttsAudio(word, accent) {
 
 async function resolveAudio(word, accent) {
   const t0 = Date.now();
-  const outcome = { word, accent, source: null, hit: false, kb: 0, ms: 0 };
-  const done = (source, hit, bytes) => {
-    outcome.source = source;
-    outcome.hit = hit;
-    outcome.kb = Math.round((bytes ?? 0) / 1024);
-    outcome.ms = Date.now() - t0;
-    console.log(
-      `audio ${outcome.word} ${outcome.accent} -> ${outcome.source}${outcome.hit ? " (cache)" : ""} ${outcome.kb}KB ${outcome.ms}ms`,
-    );
-  };
+  // steps: per-tier outcome log. Each records {step, outcome, ms, detail}.
+  const steps = [];
+  const trace = (step, outcome, ms, detail = "") =>
+    steps.push({ step, outcome, ms: Math.round(ms), detail });
+
+  const elapsed = () => Date.now() - t0;
 
   // 1. Cached real file (Cambridge or Wiktionary) wins outright.
   for (const src of ["cambridge", "wiktionary"]) {
-    const path = audioCachePath(word, accent, src);
-    const hit = serveCached(path);
+    const bytesPath = audioCachePath(word, accent, src);
+    const hit = serveCached(bytesPath);
     if (hit) {
-      done(src, true, statSync(path).size);
+      trace(src, "cache-hit", elapsed(), Math.round(statSync(bytesPath).size / 1024) + "KB");
+      logAudio(word, accent, steps, elapsed(), src, true);
       return hit;
     }
+    trace(src, "cache-miss", elapsed());
   }
 
   // 2. Cambridge (professional, UK+US).
+  const c0 = Date.now();
+  let bytes = null;
+  let errMsg = "";
   try {
-    const bytes = await cambridgeAudio(word, accent);
-    if (bytes) {
-      const path = audioCachePath(word, accent, "cambridge");
-saveAudio(path, bytes);
-      done("cambridge", false, bytes.byteLength);
-      return serveCached(path);
-    }
+    bytes = await cambridgeAudio(word, accent);
   } catch (err) {
-    console.error(`audio cambridge failed for ${word}:`, err?.message || err);
+    errMsg = String(err?.message || err).slice(0, 80);
   }
+  if (bytes) {
+    const t = Date.now() - c0;
+    const bytesPath = audioCachePath(word, accent, "cambridge");
+    saveAudio(bytesPath, bytes);
+    trace("cambridge", "fetch-ok", t, Math.round(bytes.byteLength / 1024) + "KB");
+    trace("cambridge", "cache-store", elapsed());
+    logAudio(word, accent, steps, elapsed(), "cambridge", false);
+    return serveCached(bytesPath);
+  }
+  trace("cambridge", errMsg ? "error:" + errMsg : "no-entry", Date.now() - c0);
 
   // 3. Wiktionary / Wikimedia (real human, whatever clip exists).
+  const w0 = Date.now();
+  bytes = null;
+  errMsg = "";
   try {
-    const bytes = await wiktionaryAudio(word, accent);
-    if (bytes) {
-      const path = audioCachePath(word, accent, "wiktionary");
-saveAudio(path, bytes);
-      done("wiktionary", false, bytes.byteLength);
-      return serveCached(path);
-    }
+    bytes = await wiktionaryAudio(word, accent);
   } catch (err) {
-    console.error(`audio wiktionary failed for ${word}:`, err?.message || err);
+    errMsg = String(err?.message || err).slice(0, 80);
   }
+  if (bytes) {
+    const t = Date.now() - w0;
+    const bytesPath = audioCachePath(word, accent, "wiktionary");
+    saveAudio(bytesPath, bytes);
+    trace("wiktionary", "fetch-ok", t, Math.round(bytes.byteLength / 1024) + "KB");
+    trace("wiktionary", "cache-store", elapsed());
+    logAudio(word, accent, steps, elapsed(), "wiktionary", false);
+    return serveCached(bytesPath);
+  }
+  trace("wiktionary", errMsg ? "error:" + errMsg : "no-entry", Date.now() - w0);
 
-  // 4. Google TTS (synthetic, short TTL) - caches as tts, expires in 30 days.
+  // 4. Google TTS (synthetic, short TTL expires ~30 days).
   const ttsPath = audioCachePath(word, accent, "tts");
   let hit = serveCached(ttsPath);
   if (hit) {
-    done("tts", true, statSync(ttsPath).size);
+    trace("tts", "cache-hit", elapsed(), Math.round(statSync(ttsPath).size / 1024) + "KB");
+    logAudio(word, accent, steps, elapsed(), "tts", true);
     return hit;
   }
+  trace("tts", "cache-miss", elapsed());
+
+  const tt0 = Date.now();
+  bytes = null;
+  errMsg = "";
   try {
-    const bytes = await ttsAudio(word, accent);
-    if (bytes) {
-saveAudio(ttsPath, bytes);
-      done("tts", false, bytes.byteLength);
-      return serveCached(ttsPath);
-    }
+    bytes = await ttsAudio(word, accent);
   } catch (err) {
-    console.error(`audio tts failed for ${word}:`, err?.message || err);
+    errMsg = String(err?.message || err).slice(0, 80);
   }
+  if (bytes) {
+    const t = Date.now() - tt0;
+    saveAudio(ttsPath, bytes);
+    trace("tts", "fetch-ok", t, Math.round(bytes.byteLength / 1024) + "KB");
+    trace("tts", "cache-store", elapsed());
+    logAudio(word, accent, steps, elapsed(), "tts", false);
+    return serveCached(ttsPath);
+  }
+  trace("tts", errMsg ? "error:" + errMsg : "no-entry", Date.now() - tt0);
 
   // 5. Fail clean: explicit 404 the plugin can render as "no audio".
-  outcome.source = "none";
-  outcome.ms = Date.now() - t0;
-  console.log(`audio ${outcome.word} ${outcome.accent} -> none ${outcome.ms}ms`);
+  logAudio(word, accent, steps, elapsed(), "none", false);
   return Response.json({ error: "No audio available" }, { status: 404 });
+}
+
+// Emit one structured line per resolution for Dozzle/grep friendliness.
+function logAudio(word, accent, steps, totalMs, source, cacheHit) {
+  const walk = steps
+    .map((s) => {
+      let base = s.step + "=" + s.outcome;
+      if (s.ms != null) base += "(" + s.ms + "ms)";
+      if (s.detail) base += ":" + s.detail;
+      return base;
+    })
+    .join(" ");
+  console.log(
+    "audio word=" + word + " accent=" + accent + " src=" + source + " cache=" + (cacheHit ? "hit" : "miss") + " total=" + totalMs + "ms " + walk,
+  );
 }
 
 Bun.serve({
