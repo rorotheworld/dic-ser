@@ -53,32 +53,46 @@ const WIKTIONARY_REST = (lang) =>
   `https://en.wiktionary.org/api/rest_v1/page/definition/${lang}`;
 
 // Map a Wiktionary REST definition payload into the same entry shape the local
-// DB server and the define-slot plugin already understand. Only real dictionary
-// languages (English `en`, plus the request language when it differs) are taken;
-// the `other` bucket of homographs/etymologies is skipped to keep the card at
-// one language. Definitions come back as tiny HTML (links, usage spans) which
-// is stripped to plain text. Returns null when nothing usable came back.
+// DB server and the define-slot plugin already understand. The requested
+// language (English for a normal lookup) is preferred first; when it is absent
+// - a foreign word with no English sense - the other language buckets are
+// served so the card still shows *something* (the word's definition in its own
+// language) rather than an empty card. Each entry carries its real lang_code.
+// Definitions come back as tiny HTML (links, usage spans) which is stripped to
+// plain text. Returns null when nothing usable came back.
 function mapRESTResponse(payload, langCode) {
-  const bucket = payload?.[langCode] || payload?.en;
-  if (!Array.isArray(bucket) || bucket.length === 0) return null;
+  if (!payload || typeof payload !== "object") return null;
+
+  // Order buckets: the requested language first, then everything else. Keep
+  // bucket order stable (entries sorted by language) so output is deterministic.
+  const keys = Object.keys(payload);
+  const ordered = [...keys].sort((a, b) => {
+    const ap = a === langCode ? 0 : 1;
+    const bp = b === langCode ? 0 : 1;
+    return ap !== bp ? ap - bp : a.localeCompare(b);
+  });
 
   const entries = [];
-  for (const block of bucket) {
-    if (typeof block !== "object" || !block) continue;
-    const defs = Array.isArray(block.definitions) ? block.definitions : [];
-    const glosses = defs
-      .map((d) => stripTags(String(d?.definition || "")))
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0);
-    if (!glosses.length) continue;
-    entries.push({
-      lang_code: langCode,
-      pos: String(block.partOfSpeech || "").trim(),
-      senses: [{ glosses }],
-      sounds: [],
-      etymology: "",
-      related: {},
-    });
+  for (const lang of ordered) {
+    const bucket = payload[lang];
+    if (!Array.isArray(bucket)) continue;
+    for (const block of bucket) {
+      if (typeof block !== "object" || !block) continue;
+      const defs = Array.isArray(block.definitions) ? block.definitions : [];
+      const glosses = defs
+        .map((d) => stripTags(String(d?.definition || "")))
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0);
+      if (!glosses.length) continue;
+      entries.push({
+        lang_code: lang,
+        pos: String(block.partOfSpeech || "").trim(),
+        senses: [{ glosses }],
+        sounds: [],
+        etymology: "",
+        related: {},
+      });
+    }
   }
 
   return entries.length ? entries : null;
