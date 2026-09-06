@@ -268,10 +268,26 @@ async function ttsAudio(word, accent) {
 }
 
 async function resolveAudio(word, accent) {
+  const t0 = Date.now();
+  const outcome = { word, accent, source: null, hit: false, kb: 0, ms: 0 };
+  const done = (source, hit, bytes) => {
+    outcome.source = source;
+    outcome.hit = hit;
+    outcome.kb = Math.round((bytes ?? 0) / 1024);
+    outcome.ms = Date.now() - t0;
+    console.log(
+      `audio ${outcome.word} ${outcome.accent} -> ${outcome.source}${outcome.hit ? " (cache)" : ""} ${outcome.kb}KB ${outcome.ms}ms`,
+    );
+  };
+
   // 1. Cached real file (Cambridge or Wiktionary) wins outright.
   for (const src of ["cambridge", "wiktionary"]) {
-    const hit = serveCached(audioCachePath(word, accent, src));
-    if (hit) return hit;
+    const path = audioCachePath(word, accent, src);
+    const hit = serveCached(path);
+    if (hit) {
+      done(src, true, statSync(path).size);
+      return hit;
+    }
   }
 
   // 2. Cambridge (professional, UK+US).
@@ -279,7 +295,8 @@ async function resolveAudio(word, accent) {
     const bytes = await cambridgeAudio(word, accent);
     if (bytes) {
       const path = audioCachePath(word, accent, "cambridge");
-      saveAudio(path, bytes);
+saveAudio(path, bytes);
+      done("cambridge", false, bytes.byteLength);
       return serveCached(path);
     }
   } catch (err) {
@@ -291,7 +308,8 @@ async function resolveAudio(word, accent) {
     const bytes = await wiktionaryAudio(word, accent);
     if (bytes) {
       const path = audioCachePath(word, accent, "wiktionary");
-      saveAudio(path, bytes);
+saveAudio(path, bytes);
+      done("wiktionary", false, bytes.byteLength);
       return serveCached(path);
     }
   } catch (err) {
@@ -301,11 +319,15 @@ async function resolveAudio(word, accent) {
   // 4. Google TTS (synthetic, short TTL) - caches as tts, expires in 30 days.
   const ttsPath = audioCachePath(word, accent, "tts");
   let hit = serveCached(ttsPath);
-  if (hit) return hit;
+  if (hit) {
+    done("tts", true, statSync(ttsPath).size);
+    return hit;
+  }
   try {
     const bytes = await ttsAudio(word, accent);
     if (bytes) {
-      saveAudio(ttsPath, bytes);
+saveAudio(ttsPath, bytes);
+      done("tts", false, bytes.byteLength);
       return serveCached(ttsPath);
     }
   } catch (err) {
@@ -313,6 +335,9 @@ async function resolveAudio(word, accent) {
   }
 
   // 5. Fail clean: explicit 404 the plugin can render as "no audio".
+  outcome.source = "none";
+  outcome.ms = Date.now() - t0;
+  console.log(`audio ${outcome.word} ${outcome.accent} -> none ${outcome.ms}ms`);
   return Response.json({ error: "No audio available" }, { status: 404 });
 }
 
