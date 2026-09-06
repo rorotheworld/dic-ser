@@ -379,11 +379,18 @@ function logAudio(word, accent, steps, totalMs, source, cacheHit) {
 Bun.serve({
   port: PORT,
   async fetch(request) {
+    const t0 = Date.now();
     const url = new URL(request.url);
+    const log = (status, extra = "") =>
+      console.log(
+        `req method=${request.method} path=${url.pathname} status=${status} ms=${Date.now() - t0}${extra ? " " + extra : ""}`,
+      );
 
     if (url.pathname === "/health") {
       if (!db) return Response.json({ status: "loading", words: 0 });
-      return Response.json({ status: "ok", words: COUNT_WORDS.get().count });
+      const res = Response.json({ status: "ok", words: COUNT_WORDS.get().count });
+      log(200);
+      return res;
     }
 
     // /api/en/{word}
@@ -393,8 +400,10 @@ Bun.serve({
       const lang = url.searchParams.get("lang") || "en";
       const result = lookup(word, lang);
       if (!result) {
+        log(404, `word=${word}`);
         return Response.json({ error: `No entries found for "${word}"` }, { status: 404 });
       }
+      log(200, `word=${word} entries=${result.entries.length}`);
       return Response.json(result);
     }
 
@@ -407,11 +416,17 @@ Bun.serve({
       // with no entry at all (nonsense/typo/random string) must never reach the
       // external sources or pollute the cache with TTS noise.
       if (!db || !WORD_EXISTS.get(word, "en")) {
+        log(404, `audio word=${word} accent=${accent} blocked=not-in-db`);
         return Response.json({ error: "No audio available" }, { status: 404 });
       }
-      return resolveAudio(word, accent);
+      // resolveAudio logs its own detailed trace line, so the req line here is
+      // kept light (opaque: we do not know the outcome until the call resolves).
+      const res = await resolveAudio(word, accent);
+      log(res.status, `audio word=${word} accent=${accent}`);
+      return res;
     }
 
+    log(404);
     return Response.json({ error: "not found" }, { status: 404 });
   },
 });
