@@ -197,6 +197,17 @@ async function cambridgeAudio(word, accent) {
     headers: { "User-Agent": "degoog-dictionary/1.0 (self-hosted dictionary card)" },
   });
   if (!res.ok) return null;
+
+  // Cambridge has no entry page for some words: it 30x-redirects to the bare
+  // /dictionary/english/ (or a suggestion page), which still contains audio
+  // blocks for OTHER words. The first uk_pron/us_pron mp3 there would be
+  // someone else's clip - literally "shellfish" for "lycanthropic". A real
+  // entry keeps the final URL pointed at the requested word; anything else is
+  // a clean miss (we fall through to Wiktionary/TTS), never a wrong-word clip.
+  const finalUrl = String(res.url || "");
+  const expected = `/dictionary/english/${lemma}`;
+  if (!finalUrl.toLowerCase().includes(expected.toLowerCase())) return null;
+
   const html = await res.text();
   const kind = accent === "us" ? "us_pron" : "uk_pron";
   // Match either absolute or relative media URLs for the requested accent.
