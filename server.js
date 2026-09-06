@@ -46,6 +46,7 @@ let db;
 let SELECT_ENTRIES;
 let COUNT_WORDS;
 let SELECT_SOUNDS;
+let WORD_EXISTS;
 
 function openDb() {
   const conn = new Database(DB_PATH, { readonly: true });
@@ -65,6 +66,9 @@ function prepareStatements(conn) {
   SELECT_SOUNDS = conn.prepare(`
     SELECT sounds FROM entries
     WHERE word = ? AND lang_code = ? AND sounds IS NOT NULL
+  `);
+  WORD_EXISTS = conn.prepare(`
+    SELECT 1 FROM entries WHERE word = ? AND lang_code = ? LIMIT 1
   `);
   COUNT_WORDS = conn.prepare(`SELECT COUNT(*) AS count FROM entries`);
 }
@@ -339,6 +343,12 @@ Bun.serve({
     if (audioMatch) {
       const word = decodeURIComponent(audioMatch[1]).toLowerCase();
       const accent = url.searchParams.get("accent") === "us" ? "us" : "uk";
+      // Only real dictionary headwords qualify for pronunciation audio. A word
+      // with no entry at all (nonsense/typo/random string) must never reach the
+      // external sources or pollute the cache with TTS noise.
+      if (!db || !WORD_EXISTS.get(word, "en")) {
+        return Response.json({ error: "No audio available" }, { status: 404 });
+      }
       return resolveAudio(word, accent);
     }
 
