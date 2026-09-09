@@ -38,7 +38,11 @@ const DEST_JSONL = join(JSONL_DIR, "en.jsonl");
 // Optional Telegram notification on refresh success/failure. Token and chat come
 // from the environment (passed by the update script); if either is absent no
 // message is sent, so the public repo carries no secrets.
-async function notify(message) {
+// parseMode is only set on the success notice so its **bold** renders. The
+// failure notice deliberately stays plain text: err.message can contain
+// markdown-special characters (parens, brackets) that would make Telegram
+// reject the message outright - exactly when the alert must get through.
+async function notify(message, parseMode) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chat = process.env.TELEGRAM_CHAT_ID;
   if (!token || !chat) return;
@@ -46,7 +50,11 @@ async function notify(message) {
     await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: chat, text: message }),
+      body: JSON.stringify({
+        chat_id: chat,
+        text: message,
+        ...(parseMode ? { parse_mode: parseMode } : {}),
+      }),
     });
   } catch (err) {
     console.error("telegram notify failed:", err);
@@ -112,10 +120,12 @@ async function main() {
 
   // Signal the server to hot-swap. Written only after the DB is fully built.
   await writeFile(READY_MARKER, new Date().toISOString());
-  console.log(`Wrote ${READY_MARKER}; dic-ser will hot-swap within its poll window.`);
+  console.log(`Wrote ${READY_MARKER}; dic-ser will hot-swap immediately.`);
 
   await notify(
-    `dic-ser refresh OK: ${count.toLocaleString()} English entries, ${(size / 1e9).toFixed(2)} GB. Hot-swapping.`,
+    `📙 dic-ser dictionary update: **COMPLETE**
+ ${(size / 1e9).toFixed(2)} GB for ${count.toLocaleString()} English entries. Hot swapping now.`,
+    "Markdown",
   );
 
   // 4. Reclaim disk: the cached extract is only needed to rebuild. The weekly

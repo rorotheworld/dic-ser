@@ -9,10 +9,12 @@
 //
 // HOT-SWAP: when refresh.js finishes building a new staging database it writes
 // /data/.refresh-ready (after producing /data/wiktionary.db.new). The server
-// polls for that marker every few seconds; when it appears it closes the current
-// SQLite handle, moves wiktionary.db.new over wiktionary.db, removes the marker,
-// and reopens. Lookups on the old data keep serving until the instant of the
-// move, so a refresh never interrupts the dictionary.
+// watches /data for file events and runs the swap the moment the marker
+// appears (plus once at boot, to adopt a marker left by a refresh that finished
+// while the server was down). The swap closes the current SQLite handle, moves
+// wiktionary.db.new over wiktionary.db, removes the marker, and reopens.
+// Lookups on the old data keep serving until the instant of the move, so a
+// refresh never interrupts the dictionary.
 //
 // AUDIO RESOLUTION: GET /audio/{word}[?accent=uk|us] walks a source chain and
 // caches results to disk:
@@ -28,7 +30,7 @@
 
 import { Database } from "bun:sqlite";
 import { join } from "node:path";
-import { existsSync, renameSync, statSync, readdirSync, rmSync, mkdirSync } from "node:fs";
+import { existsSync, renameSync, statSync, readdirSync, rmSync, mkdirSync, watch } from "node:fs";
 import { createHash } from "node:crypto";
 
 const PORT = Number(process.env.PORT || 3000);
@@ -38,7 +40,6 @@ const NEW_DB_PATH = join(DATA_DIR, "wiktionary.db.new");
 const READY_MARKER = join(DATA_DIR, ".refresh-ready");
 const AUDIO_DIR = join(DATA_DIR, "audio");
 
-const SWAP_POLL_MS = Number(process.env.SWAP_POLL_MS || 5000);
 const AUDIO_TTL_MS = 30 * 24 * 60 * 60 * 1000; // TTS cache expiry: 30 days
 const FETCH_TIMEOUT_MS = 2500; // per-tier deadline
 // Opt-in last-resort definition source. The local DB is a weekly, English-only
@@ -224,24 +225,44 @@ function trySwap() {
 
 db = null;
 try {
-  if (existsSync(DB_PATH)) {
+  // Adopt at boot: a refresh may have finished while the server was down and
+  // left .refresh-ready (plus wiktionary.db.new) behind. trySwap() adopts it
+  // (initial-load path, since no handle is open yet) and returns false when
+  // there is no marker, in which case we fall through to the normal open.
+  if (!trySwap() && existsSync(DB_PATH)) {
     db = openDb();
     prepareStatements(db);
     console.log(`database ready: ${DB_PATH}`);
-  } else if (!trySwap()) {
+  } else if (!db) {
     console.log(`no database yet at ${DB_PATH}; waiting for a refresh to produce one`);
   }
 } catch (err) {
   console.error("initial load failed:", err);
 }
 
-setInterval(() => {
-  try {
-    trySwap();
-  } catch (err) {
-    console.error("hot-swap failed:", err);
-  }
-}, SWAP_POLL_MS);
+// Event-driven hot-swap, replacing the old poll-every-5s timer. Watch the data
+// directory and run trySwap() the moment anything in it changes; the marker is
+// written last by refresh.js, so its appearance means a fully-built staging DB
+// is sitting beside us. We react to every event, not just the marker's own:
+// rename-in-place semantics differ between platforms (a marker may surface as
+// "create", "rename", or "change"), and trySwap() is cheap when no marker is
+// present, so filtering would only add ways to miss the swap. The swap itself
+// is idempotent - after a successful swap the marker is removed, so a second
+// or stray watcher event (watchers may fire once, twice, or not at all for a
+// given change) simply finds no marker and returns without touching the file.
+try {
+  watch(DATA_DIR, { recursive: true }, () => {
+    try {
+      trySwap();
+    } catch (err) {
+      console.error("hot-swap failed:", err);
+    }
+  });
+} catch (err) {
+  console.error("file watch failed:", err);
+  // The server still serves the already-open DB, but automatic hot-swapping is
+  // unavailable; a restart will adopt any pending marker. No polling fallback.
+}
 
 function lookup(word, langCode) {
   if (!db) return null;

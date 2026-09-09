@@ -23,7 +23,7 @@ a week - the same source `api.dictionaryapi.dev` and wiktapi are built on.
   etymology, and related words. Raw entries can be tens of KB; the compact
   projection keeps the database around a few hundred MB.
 
-Data is CC BY-SA 3.0 / GFDL (Wiktionary), which the card/UI should attribute.
+Data is CC BY-SA 3.0 / GFDL (Wiktionary).
 
 ## Layout
 
