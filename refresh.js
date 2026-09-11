@@ -10,8 +10,8 @@
 // After a successful import the cached .gz/.jsonl are deleted to reclaim ~25 GB
 // of disk. The weekly update step forces a fresh download by deleting the jsonl
 // cache before running this; a manual run without --force reuses whatever cache
-// still exists, which is what the initial build does against an
-// already-downloaded extract.
+// still exists (used here for the initial build against the already-downloaded
+// extract on Jane).
 //
 // Run inside the container:
 //   bun refresh.js [--force]
@@ -19,7 +19,6 @@
 import { createGunzip } from "node:zlib";
 import { createReadStream, createWriteStream, existsSync } from "node:fs";
 import { pipeline } from "node:stream/promises";
-import { Readable } from "node:stream";
 import { join } from "node:path";
 import { mkdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { openDatabase, importJsonl, buildIndexes } from "./import.js";
@@ -34,32 +33,6 @@ const FORCE = process.argv.includes("--force");
 const SOURCE_URL = "https://kaikki.org/dictionary/raw-wiktextract-data.jsonl.gz";
 const DEST_GZ = join(JSONL_DIR, "en.jsonl.gz");
 const DEST_JSONL = join(JSONL_DIR, "en.jsonl");
-
-// Optional Telegram notification on refresh success/failure. Token and chat come
-// from the environment (passed by the update script); if either is absent no
-// message is sent, so the public repo carries no secrets.
-// parseMode is only set on the success notice so its **bold** renders. The
-// failure notice deliberately stays plain text: err.message can contain
-// markdown-special characters (parens, brackets) that would make Telegram
-// reject the message outright - exactly when the alert must get through.
-async function notify(message, parseMode) {
-  const token = process.env.TELEGRAM_BOT_TOKEN;
-  const chat = process.env.TELEGRAM_CHAT_ID;
-  if (!token || !chat) return;
-  try {
-    await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: chat,
-        text: message,
-        ...(parseMode ? { parse_mode: parseMode } : {}),
-      }),
-    });
-  } catch (err) {
-    console.error("telegram notify failed:", err);
-  }
-}
 
 async function main() {
   for (const dir of [DATA_DIR, JSONL_DIR]) {
@@ -77,8 +50,35 @@ async function main() {
     console.log(`Downloading ${SOURCE_URL}`);
     const res = await fetch(SOURCE_URL);
     if (!res.ok || !res.body) throw new Error(`download failed: HTTP ${res.status}`);
+    // The full file size (for the percentage): prefer Content-Range's total
+    // ("bytes 0-0/2863713969") when present, otherwise Content-Length, and
+    // fall back to no percentage if the server gives neither.
+    const contentLength = Number(res.headers.get("content-length") || 0);
+    const rangeTotal = Number((res.headers.get("content-range") || "").split("/")[1] || 0);
+    const totalBytes = contentLength > 0 ? contentLength : rangeTotal;
     const tmpGz = `${DEST_GZ}.tmp`;
-    await pipeline(Readable.fromWeb(res.body), createWriteStream(tmpGz));
+    let gotBytes = 0;
+    let lastLog = Date.now();
+    const sink = Bun.file(tmpGz).writer();
+    try {
+      for await (const chunk of res.body) {
+        const bytes = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
+        await sink.write(bytes);
+        gotBytes += bytes.byteLength;
+        if (Date.now() - lastLog >= 15000) {
+          lastLog = Date.now();
+          const gotGb = (gotBytes / 1e9).toFixed(2);
+          if (totalBytes > 0) {
+            const pct = Math.round((gotBytes / totalBytes) * 100);
+            console.log(`  downloaded ${gotGb} GB of ${(totalBytes / 1e9).toFixed(2)} GB (${pct}%)`);
+          } else {
+            console.log(`  downloaded ${gotGb} GB so far`);
+          }
+        }
+      }
+    } finally {
+      await sink.close();
+    }
     await rename(tmpGz, DEST_GZ);
     const { size } = await stat(DEST_GZ);
     console.log(`Downloaded ${(size / 1e9).toFixed(2)} GB compressed`);
@@ -122,12 +122,6 @@ async function main() {
   await writeFile(READY_MARKER, new Date().toISOString());
   console.log(`Wrote ${READY_MARKER}; dic-ser will hot-swap immediately.`);
 
-  await notify(
-    `📙 dic-ser dictionary update: **COMPLETE**
- ${(size / 1e9).toFixed(2)} GB for ${count.toLocaleString()} English entries. Hot swapping now.`,
-    "Markdown",
-  );
-
   // 4. Reclaim disk: the cached extract is only needed to rebuild. The weekly
   //    update forces a fresh fetch anyway.
   await rm(DEST_JSONL, { force: true });
@@ -137,7 +131,6 @@ async function main() {
 
 main().catch(async (err) => {
   console.error("refresh failed:", err);
-  await notify(`dic-ser refresh FAILED: ${String(err?.message || err)}. Old data still serving.`).catch(() => {});
   // Remove a half-built staging DB so a retry starts clean, and leave the cached
   // extract alone (a retry can reuse it instead of re-downloading).
   await rm(NEW_DB_PATH, { force: true }).catch(() => {});
